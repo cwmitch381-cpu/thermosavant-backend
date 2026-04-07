@@ -26,7 +26,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Save a lead/proposal when contractor generates one
+// Save a contractor-generated lead/proposal
 app.post('/api/leads', asyncHandler(async (req, res) => {
   const {
     contractor_name, contractor_company, contractor_email,
@@ -40,8 +40,8 @@ app.post('/api/leads', asyncHandler(async (req, res) => {
       (contractor_name, contractor_company, contractor_email, 
        building_owner_name, building_owner_email, building_type,
        monthly_bill, annual_savings, payback_years, units_recommended,
-       proposal_generated_at, zip_code, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+       proposal_generated_at, zip_code, source, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'contractor_generated',NOW())
      RETURNING id`,
     [
       contractor_name, contractor_company, contractor_email,
@@ -51,8 +51,65 @@ app.post('/api/leads', asyncHandler(async (req, res) => {
       zip_code || null
     ]
   );
-
   res.json({ success: true, lead_id: result.rows[0].id });
+}));
+
+// Save a consumer inbound lead (from /savings page)
+app.post('/api/leads/consumer', asyncHandler(async (req, res) => {
+  const {
+    consumer_name, consumer_email, consumer_phone,
+    building_type, monthly_bill, zip_code
+  } = req.body;
+
+  // Calculate estimated savings (simplified model)
+  const bill = parseFloat(monthly_bill) || 0;
+  const savingsPct = building_type === 'residential' ? 0.32 :
+                     building_type === 'commercial' ? 0.28 : 0.30;
+  const annual_savings = Math.round(bill * 12 * savingsPct);
+  const payback_years = parseFloat((bill < 200 ? 5.5 : bill < 400 ? 4.2 : 3.5).toFixed(1));
+  const units_recommended = bill < 200 ? 1 : bill < 400 ? 2 : bill < 800 ? 4 : 6;
+
+  const result = await pool.query(
+    `INSERT INTO leads 
+      (building_owner_name, building_owner_email, building_type,
+       monthly_bill, annual_savings, payback_years, units_recommended,
+       zip_code, source, consumer_name, consumer_phone, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'consumer_inbound',$9,$10,NOW())
+     RETURNING id, annual_savings, payback_years, units_recommended`,
+    [
+      consumer_name, consumer_email, building_type,
+      bill, annual_savings, payback_years, units_recommended,
+      zip_code || null,
+      consumer_name, consumer_phone || null
+    ]
+  );
+
+  // Also notify via Formspree (fire and forget)
+  fetch('https://formspree.io/f/mlgooqew', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({
+      _subject: `New Consumer Lead — ${zip_code || 'Unknown ZIP'} — $${bill}/mo`,
+      name: consumer_name,
+      email: consumer_email,
+      phone: consumer_phone || 'Not provided',
+      building_type,
+      monthly_bill: `$${bill}`,
+      zip_code: zip_code || 'Not provided',
+      annual_savings: `$${annual_savings}`,
+      payback: `${payback_years} years`,
+      source: 'Consumer Savings Page',
+    })
+  }).catch(() => {});
+
+  res.json({
+    success: true,
+    lead_id: result.rows[0].id,
+    annual_savings: result.rows[0].annual_savings,
+    payback_years: result.rows[0].payback_years,
+    units_recommended: result.rows[0].units_recommended,
+    monthly_savings: Math.round(annual_savings / 12)
+  });
 }));
 
 // Get all leads - Solthera portal
@@ -80,7 +137,8 @@ app.get('/api/portal/stats', asyncHandler(async (req, res) => {
       COALESCE(AVG(payback_years), 0) as avg_payback_years,
       COALESCE(SUM(units_recommended), 0) as total_units_recommended,
       COUNT(CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN 1 END) as proposals_this_week,
-      COUNT(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN 1 END) as proposals_this_month
+      COUNT(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN 1 END) as proposals_this_month,
+      COUNT(CASE WHEN source = 'consumer_inbound' THEN 1 END) as consumer_leads
     FROM leads
   `);
 

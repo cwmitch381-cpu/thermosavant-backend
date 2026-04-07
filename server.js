@@ -6,25 +6,20 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Middleware
 app.use(express.json());
 app.use(cors({
   origin: ['https://thermosavantai.com', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'password']
 }));
 
-// Async handler wrapper
 const asyncHandler = fn => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
-
-// ─── ROUTES ───────────────────────────────────────────────────
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -34,17 +29,10 @@ app.get('/api/health', (req, res) => {
 // Save a lead/proposal when contractor generates one
 app.post('/api/leads', asyncHandler(async (req, res) => {
   const {
-    contractor_name,
-    contractor_company,
-    contractor_email,
-    building_owner_name,
-    building_owner_email,
-    building_type,
-    monthly_bill,
-    annual_savings,
-    payback_years,
-    units_recommended,
-    proposal_generated_at
+    contractor_name, contractor_company, contractor_email,
+    building_owner_name, building_owner_email, building_type,
+    monthly_bill, annual_savings, payback_years, units_recommended,
+    proposal_generated_at, zip_code
   } = req.body;
 
   const result = await pool.query(
@@ -52,34 +40,32 @@ app.post('/api/leads', asyncHandler(async (req, res) => {
       (contractor_name, contractor_company, contractor_email, 
        building_owner_name, building_owner_email, building_type,
        monthly_bill, annual_savings, payback_years, units_recommended,
-       proposal_generated_at, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+       proposal_generated_at, zip_code, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
      RETURNING id`,
     [
       contractor_name, contractor_company, contractor_email,
       building_owner_name, building_owner_email, building_type,
       monthly_bill, annual_savings, payback_years, units_recommended,
-      proposal_generated_at || new Date().toISOString()
+      proposal_generated_at || new Date().toISOString(),
+      zip_code || null
     ]
   );
 
   res.json({ success: true, lead_id: result.rows[0].id });
 }));
 
-// Get all leads - used by Solthera portal
+// Get all leads - Solthera portal
 app.get('/api/portal/leads', asyncHandler(async (req, res) => {
   const { password } = req.headers;
   if (password !== process.env.PORTAL_PASSWORD) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-
-  const leads = await pool.query(
-    `SELECT * FROM leads ORDER BY created_at DESC`
-  );
+  const leads = await pool.query(`SELECT * FROM leads ORDER BY created_at DESC`);
   res.json(leads.rows);
 }));
 
-// Get summary stats - used by Solthera portal dashboard
+// Get summary stats - Solthera portal dashboard
 app.get('/api/portal/stats', asyncHandler(async (req, res) => {
   const { password } = req.headers;
   if (password !== process.env.PORTAL_PASSWORD) {
@@ -100,20 +86,41 @@ app.get('/api/portal/stats', asyncHandler(async (req, res) => {
 
   const byType = await pool.query(`
     SELECT building_type, COUNT(*) as count, COALESCE(SUM(annual_savings),0) as total_savings
-    FROM leads
-    GROUP BY building_type
-    ORDER BY count DESC
+    FROM leads GROUP BY building_type ORDER BY count DESC
   `);
 
-  const recent = await pool.query(`
-    SELECT * FROM leads ORDER BY created_at DESC LIMIT 10
-  `);
+  const recent = await pool.query(`SELECT * FROM leads ORDER BY created_at DESC LIMIT 10`);
 
   res.json({
     summary: stats.rows[0],
     by_building_type: byType.rows,
     recent_proposals: recent.rows
   });
+}));
+
+// Heat map data - proposals grouped by zip code
+app.get('/api/portal/map', asyncHandler(async (req, res) => {
+  const { password } = req.headers;
+  if (password !== process.env.PORTAL_PASSWORD) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const data = await pool.query(`
+    SELECT
+      zip_code,
+      COUNT(*) as proposal_count,
+      COALESCE(SUM(annual_savings), 0) as total_savings,
+      COALESCE(AVG(payback_years), 0) as avg_payback,
+      COALESCE(SUM(units_recommended), 0) as total_units,
+      COUNT(DISTINCT contractor_email) as contractor_count,
+      MAX(created_at) as last_activity
+    FROM leads
+    WHERE zip_code IS NOT NULL AND zip_code != ''
+    GROUP BY zip_code
+    ORDER BY proposal_count DESC
+  `);
+
+  res.json(data.rows);
 }));
 
 // Error handler

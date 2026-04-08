@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { runFollowUps } = require('./followup');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -84,8 +85,7 @@ app.post('/api/leads/consumer', asyncHandler(async (req, res) => {
   }).catch(() => {});
 
   res.json({
-    success: true,
-    lead_id: result.rows[0].id,
+    success: true, lead_id: result.rows[0].id,
     annual_savings: result.rows[0].annual_savings,
     payback_years: result.rows[0].payback_years,
     units_recommended: result.rows[0].units_recommended,
@@ -189,7 +189,8 @@ app.get('/api/contractor/stats', asyncHandler(async (req, res) => {
       COUNT(CASE WHEN lead_status='won' THEN 1 END) as won,
       COUNT(CASE WHEN lead_status='lost' THEN 1 END) as lost,
       COALESCE(SUM(annual_savings),0) as pipeline_value,
-      COUNT(CASE WHEN created_at >= NOW()-INTERVAL '30 days' THEN 1 END) as this_month
+      COUNT(CASE WHEN created_at >= NOW()-INTERVAL '30 days' THEN 1 END) as this_month,
+      COUNT(CASE WHEN follow_up_count > 0 THEN 1 END) as follow_ups_sent
     FROM leads WHERE contractor_email = $1 OR contractor_id = $2`,
     [email, contractor_id]
   );
@@ -202,16 +203,33 @@ app.patch('/api/contractor/leads/:id', asyncHandler(async (req, res) => {
 
   const ctr = await pool.query(`SELECT email FROM contractors WHERE id = $1`, [contractor_id]);
   const email = ctr.rows[0]?.email || '';
-  const { lead_status, notes } = req.body;
+  const { lead_status, notes, follow_up_enabled } = req.body;
 
   await pool.query(
     `UPDATE leads SET
        lead_status = COALESCE($1, lead_status),
-       notes = COALESCE($2, notes)
-     WHERE id = $3 AND (contractor_email = $4 OR contractor_id = $5)`,
-    [lead_status, notes, req.params.id, email, contractor_id]
+       notes = COALESCE($2, notes),
+       follow_up_enabled = COALESCE($3, follow_up_enabled)
+     WHERE id = $4 AND (contractor_email = $5 OR contractor_id = $6)`,
+    [lead_status, notes, follow_up_enabled, req.params.id, email, contractor_id]
   );
   res.json({ success: true });
+}));
+
+// ─── CRON: FOLLOW-UP ENGINE ───────────────────────────
+// Called daily by Railway cron job at 9am MT
+// Can also be triggered manually for testing
+app.get('/api/cron/followup', asyncHandler(async (req, res) => {
+  const secret = req.headers['x-cron-secret'] || req.query.secret;
+  if (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  console.log('[CRON] Running follow-up engine:', new Date().toISOString());
+  const results = await runFollowUps(pool);
+  console.log('[CRON] Results:', results);
+
+  res.json({ success: true, timestamp: new Date().toISOString(), ...results });
 }));
 
 // Helper: verify contractor token

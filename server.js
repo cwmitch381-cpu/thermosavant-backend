@@ -190,3 +190,108 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`ThermoSavant backend running on port ${PORT}`);
 });
+// ─── CONTRACTOR CRM ROUTES ────────────────────────────
+
+// Contractor login with access code
+app.post('/api/contractor/login', asyncHandler(async (req, res) => {
+  const { access_code } = req.body;
+  if (!access_code) return res.status(400).json({ error: 'Access code required' });
+
+  const result = await pool.query(
+    `SELECT id, name, company, email, phone, license FROM contractors 
+     WHERE access_code = $1 AND is_active = true`,
+    [access_code.trim().toUpperCase()]
+  );
+
+  if (!result.rows.length) {
+    return res.status(401).json({ error: 'Invalid access code' });
+  }
+
+  const contractor = result.rows[0];
+  // Store token in response (simple session token = contractor id + timestamp)
+  const token = Buffer.from(`${contractor.id}:${Date.now()}`).toString('base64');
+  
+  res.json({ success: true, contractor, token });
+}));
+
+// Get contractor's leads pipeline
+app.get('/api/contractor/leads', asyncHandler(async (req, res) => {
+  const token = req.headers['x-contractor-token'];
+  const contractor_id = await verifyContractorToken(token);
+  if (!contractor_id) return res.status(401).json({ error: 'Unauthorized' });
+
+  const leads = await pool.query(
+    `SELECT * FROM leads 
+     WHERE contractor_email = (SELECT email FROM contractors WHERE id = $1)
+        OR contractor_id = $1
+     ORDER BY created_at DESC`,
+    [contractor_id]
+  );
+
+  res.json(leads.rows);
+}));
+
+// Get contractor stats
+app.get('/api/contractor/stats', asyncHandler(async (req, res) => {
+  const token = req.headers['x-contractor-token'];
+  const contractor_id = await verifyContractorToken(token);
+  if (!contractor_id) return res.status(401).json({ error: 'Unauthorized' });
+
+  const contractor = await pool.query(
+    `SELECT email FROM contractors WHERE id = $1`, [contractor_id]
+  );
+  const email = contractor.rows[0]?.email;
+
+  const stats = await pool.query(`
+    SELECT
+      COUNT(*) as total_leads,
+      COUNT(CASE WHEN lead_status = 'proposal_sent' THEN 1 END) as proposals_sent,
+      COUNT(CASE WHEN lead_status = 'follow_up' THEN 1 END) as follow_ups,
+      COUNT(CASE WHEN lead_status = 'won' THEN 1 END) as won,
+      COUNT(CASE WHEN lead_status = 'lost' THEN 1 END) as lost,
+      COALESCE(SUM(annual_savings), 0) as pipeline_value,
+      COUNT(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN 1 END) as this_month
+    FROM leads
+    WHERE contractor_email = $1 OR contractor_id = $2
+  `, [email, contractor_id]);
+
+  res.json(stats.rows[0]);
+}));
+
+// Update lead status
+app.patch('/api/contractor/leads/:id', asyncHandler(async (req, res) => {
+  const token = req.headers['x-contractor-token'];
+  const contractor_id = await verifyContractorToken(token);
+  if (!contractor_id) return res.status(401).json({ error: 'Unauthorized' });
+
+  const { lead_status, notes } = req.body;
+  const { id } = req.params;
+
+  const contractor = await pool.query(
+    `SELECT email FROM contractors WHERE id = $1`, [contractor_id]
+  );
+  const email = contractor.rows[0]?.email;
+
+  await pool.query(
+    `UPDATE leads SET 
+       lead_status = COALESCE($1, lead_status),
+       notes = COALESCE($2, notes)
+     WHERE id = $3 AND (contractor_email = $4 OR contractor_id = $5)`,
+    [lead_status, notes, id, email, contractor_id]
+  );
+
+  res.json({ success: true });
+}));
+
+// Helper: verify contractor token
+async function verifyContractorToken(token) {
+  if (!token) return null;
+  try {
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    const [id] = decoded.split(':');
+    const result = await pool.query(
+      `SELECT id FROM contractors WHERE id = $1 AND is_active = true`, [parseInt(id)]
+    );
+    return result.rows.length ? parseInt(id) : null;
+  } catch { return null; }
+}

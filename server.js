@@ -247,7 +247,7 @@ async function verifyToken(token) {
 // Called 1st of each month — generates and emails market intelligence report to Solthera
 app.get('/api/cron/report', asyncHandler(async (req, res) => {
   const secret = req.headers['x-cron-secret'] || req.query.secret;
-  if (!secret || (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026')) {
+  if (!secret || (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026' && secret !== process.env.PORTAL_PASSWORD)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 

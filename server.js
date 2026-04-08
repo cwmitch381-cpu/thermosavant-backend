@@ -222,7 +222,7 @@ app.patch('/api/contractor/leads/:id', asyncHandler(async (req, res) => {
 // Can also be triggered manually for testing
 app.get('/api/cron/followup', asyncHandler(async (req, res) => {
   const secret = req.headers['x-cron-secret'] || req.query.secret;
-  if (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026') {
+  if (!secret || (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -247,7 +247,7 @@ async function verifyToken(token) {
 // Called 1st of each month — generates and emails market intelligence report to Solthera
 app.get('/api/cron/report', asyncHandler(async (req, res) => {
   const secret = req.headers['x-cron-secret'] || req.query.secret;
-  if (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026') {
+  if (!secret || (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -256,6 +256,36 @@ app.get('/api/cron/report', asyncHandler(async (req, res) => {
   console.log('[CRON] Report result:', result);
 
   res.json({ success: true, timestamp: new Date().toISOString(), ...result });
+}));
+
+// ─── AI PROXY ─────────────────────────────────────────
+// Proxies Claude API calls from frontend — key never touches browser
+app.post('/api/ai/generate', asyncHandler(async (req, res) => {
+  const { system, user, model } = req.body;
+  if (!user) return res.status(400).json({ error: 'Missing prompt' });
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: model || 'claude-haiku-4-5-20251001',
+      max_tokens: 1200,
+      system: system || '',
+      messages: [{ role: 'user', content: user }]
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.json();
+    return res.status(response.status).json({ error: err.error?.message || 'AI error' });
+  }
+
+  const data = await response.json();
+  res.json({ content: data.content[0].text });
 }));
 
 // ─── ERROR HANDLER ────────────────────────────────────

@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { runFollowUps } = require('./followup');
+const { generateMonthlyReport } = require('./report');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -241,6 +242,21 @@ async function verifyToken(token) {
     return r.rows.length ? parseInt(id) : null;
   } catch { return null; }
 }
+
+// ─── CRON: MONTHLY REPORT ─────────────────────────────
+// Called 1st of each month — generates and emails market intelligence report to Solthera
+app.get('/api/cron/report', asyncHandler(async (req, res) => {
+  const secret = req.headers['x-cron-secret'] || req.query.secret;
+  if (secret !== process.env.CRON_SECRET && secret !== 'thermosavant-cron-2026') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  console.log('[CRON] Generating monthly report:', new Date().toISOString());
+  const result = await generateMonthlyReport(pool);
+  console.log('[CRON] Report result:', result);
+
+  res.json({ success: true, timestamp: new Date().toISOString(), ...result });
+}));
 
 // ─── ERROR HANDLER ────────────────────────────────────
 app.use((err, req, res, next) => {
